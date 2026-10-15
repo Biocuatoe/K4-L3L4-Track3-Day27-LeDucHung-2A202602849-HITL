@@ -107,7 +107,7 @@ Thresholds live in `common/schemas.py` (`AUTO_APPROVE_THRESHOLD = 0.73`, `ESCALA
 
 - Python 3.11+
 - [uv](https://docs.astral.sh/uv/) package manager
-- An [OpenRouter](https://openrouter.ai/keys) API key (free tier has $1 credit)
+- An LLM API key: [Groq](https://console.groq.com/keys) (free tier, default) or [OpenRouter](https://openrouter.ai/keys). Select with `LLM_PROVIDER=groq|openrouter`.
 - A GitHub Personal Access Token — see next section
 
 No Docker, no Postgres install, no `gh` CLI. The agent talks to GitHub directly via the REST API. Audit + checkpointer state both live in a single SQLite file (`./hitl_audit.db`) created automatically on first run.
@@ -344,7 +344,7 @@ The schema is created idempotently on first connection. To reset state completel
 rm hitl_audit.db
 ```
 
-**Environment variables** (`.env`): `OPENROUTER_API_KEY` (required), `LLM_MODEL` (default `openai/gpt-4o-mini`), `LLM_BASE_URL` (default OpenRouter), `GITHUB_TOKEN` (required), `GITHUB_USER` (optional reviewer id), `HITL_DB_PATH` (optional DB file).
+**Environment variables** (`.env`): `LLM_PROVIDER` (`groq` | `openrouter`), `GROQ_API_KEY` or `OPENROUTER_API_KEY` (the one matching the provider), `LLM_MODEL` (defaults: `openai/gpt-oss-120b` on Groq, `openai/gpt-4o-mini` on OpenRouter), `LLM_BASE_URL` (defaults to the provider endpoint; a host that does not match the provider is refused so a key is never sent to the wrong service), `GITHUB_TOKEN` (required), `GITHUB_USER` (optional reviewer id), `HITL_DB_PATH` (optional DB file).
 
 **Open the SQLite file to inspect manually.**
 ```bash
@@ -357,7 +357,7 @@ Run on 2026-10-15 (Windows, `uv`):
 
 | Check | Result |
 |---|---|
-| `uv run pytest -q` | **76 passed** |
+| `uv run pytest -q` | **83 passed** |
 | `compileall`, `uv lock --check`, `uv run ruff check .` | clean |
 | `uv run python -m audit.replay --list` / `--thread` | works; replayed a real session (below) |
 | `uv run streamlit run app.py` | server starts, `/_stcore/health` returns 200; UI flows covered headlessly by `tests/test_app.py` |
@@ -367,3 +367,9 @@ Run on 2026-10-15 (Windows, `uv`):
 | Live comment posting to a PR | **not performed** (needs a working LLM key). Posting, including HTTP failure → `commit_failed`, is covered by mocked tests. |
 
 Once the OpenRouter account has credit, the live checks are the commands in each exercise section, then `uv run streamlit run app.py`.
+
+### Groq follow-up (provider support)
+
+- Added `LLM_PROVIDER=groq|openrouter` in `common/llm.py` (OpenRouter behaviour unchanged when `LLM_PROVIDER` is unset and `OPENROUTER_API_KEY` is present). Covered by `tests/test_llm_config.py` (mocked; 83 tests pass in total).
+- **Live Groq checks were NOT performed**: no `GROQ_API_KEY` is available in `.env` or the environment of the session that made this change. Consequently the Groq model availability, `with_structured_output(PRAnalysis)` compatibility (function calling is the default method; `gpt-oss` models are documented to support tools/structured output but this is unverified here), the two Exercise 1 demo runs, and the live audit-enabled runs are all still pending. Add `GROQ_API_KEY` to `.env` and run the exercise commands above.
+- Live GitHub posting remains untested; the live smoke runs must stub `post_review_comment` in the exercise module namespace (e.g. `exercises.exercise_4_audit.post_review_comment`), because each exercise imports the function by name.
