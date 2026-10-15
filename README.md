@@ -362,14 +362,29 @@ Run on 2026-10-15 (Windows, `uv`):
 | `uv run python -m audit.replay --list` / `--thread` | works; replayed a real session (below) |
 | `uv run streamlit run app.py` | server starts, `/_stcore/health` returns 200; UI flows covered headlessly by `tests/test_app.py` |
 | **Live GitHub** (`fetch_pr` on PR-Demo #1 and #2 with the real PAT) | works (3 and 4 files fetched) |
-| **Live LLM** (OpenRouter, Exercises 1–4 on the demo PRs) | **not performed — blocked.** OpenRouter returned `402 Insufficient credits` for the configured key; the `:free` slugs I tried returned 404. No live confidence values were observed, so the "~65%" / "<58%" expectations for PR #1/#2 are **unverified**. |
+| Live LLM on OpenRouter (initial run) | superseded by the Groq verification below. Originally blocked: OpenRouter returned `402 Insufficient credits` for the configured key; the `:free` slugs I tried returned 404. No live confidence values were observed, so the "~65%" / "<58%" expectations for PR #1/#2 are **unverified**. |
 | Real GitHub fetch + stub LLM + real SQLite, reject path (nothing posted) | passed: `fetch_pr, analyze, route, human_approval, human_approval_response, commit`, each once across the interrupt/resume; reviewer = `GITHUB_USER` |
 | Live comment posting to a PR | **not performed** (needs a working LLM key). Posting, including HTTP failure → `commit_failed`, is covered by mocked tests. |
 
 Once the OpenRouter account has credit, the live checks are the commands in each exercise section, then `uv run streamlit run app.py`.
 
-### Groq follow-up (provider support)
+### Groq live verification (2026-10-15)
 
-- Added `LLM_PROVIDER=groq|openrouter` in `common/llm.py` (OpenRouter behaviour unchanged when `LLM_PROVIDER` is unset and `OPENROUTER_API_KEY` is present). Covered by `tests/test_llm_config.py` (mocked; 83 tests pass in total).
-- **Live Groq checks were NOT performed**: no `GROQ_API_KEY` is available in `.env` or the environment of the session that made this change. Consequently the Groq model availability, `with_structured_output(PRAnalysis)` compatibility (function calling is the default method; `gpt-oss` models are documented to support tools/structured output but this is unverified here), the two Exercise 1 demo runs, and the live audit-enabled runs are all still pending. Add `GROQ_API_KEY` to `.env` and run the exercise commands above.
-- Live GitHub posting remains untested; the live smoke runs must stub `post_review_comment` in the exercise module namespace (e.g. `exercises.exercise_4_audit.post_review_comment`), because each exercise imports the function by name.
+Provider `groq`, model **`openai/gpt-oss-120b`**, `https://api.groq.com/openai/v1`. Real Groq calls and real GitHub **GET** requests; **every GitHub comment POST was stubbed in-process and a guard raised on any real `httpx` POST. No real comment was posted.** Smoke harnesses used temporary SQLite files.
+
+| Check | Result |
+|---|---|
+| `get_llm().with_structured_output(PRAnalysis)` minimal request | succeeded, validated as `PRAnalysis` (function-calling mode works on this model) |
+| Exercise 1, PR-Demo #1 (real command) | fetch OK, 3 files; confidence **66%** → `human_approval` |
+| Exercise 1, PR-Demo #2 (real command) | fetch OK, 4 files; confidence **55%** → `escalate` |
+| Exercise 3 on PR #2 (posting stubbed) | confidence 53% → escalation interrupt with 4 file-specific questions → answers → re-analysis (55%) → `final_confirmation` interrupt shown before posting → approve → `committed_after_escalation` (stubbed post) |
+| Exercise 2 on PR #1 (posting stubbed) | this run scored ≥73% → `auto_approved` (stubbed post), so the approval/edit/reject path was **not** exercised live (covered by mocked tests only) |
+| Exercise 4 via `review_service`, PR #1 (stubbed post) | 68% → approval interrupt → approve → `committed`; audit events `fetch_pr, analyze, route, human_approval, human_approval_response, commit`, no duplicates, same `thread_id`, reviewer `Biocuatoe`, session restored from a fresh connection |
+| Exercise 4 via `review_service`, PR #2 (stubbed post) | scored ≥73% → `auto_approved` (stubbed); events `fetch_pr, analyze, route, auto_approve`, decision `auto`, no reviewer |
+| `audit.replay --list` / `--thread` on the smoke DB | works |
+| Streamlit headless server | starts; `/_stcore/health` → 200 |
+| Streamlit script driven by `AppTest` with live Groq (stubbed post) | PR #1: approval card (65%) → "Approve & post" → success state, same thread; PR #2: auto-approve success card; sidebar listed both sessions. The **escalation card and edit flow were not exercised live** |
+
+Confidence is model-generated and **varied between runs** on the same PR (PR #2: 55% in Exercise 1, 53% in Exercise 3, ≥73% in Exercise 4 and the UI run), so the demo PRs do not reliably land in a given branch; the expected branches above are not guaranteed. No thresholds or scores were altered.
+
+Remaining: no real GitHub comment post was tested (intentionally). LangGraph prints a deprecation-style warning about deserializing `common.schemas.PRAnalysis` from checkpoints ("will be blocked in a future version"); it is harmless today.
