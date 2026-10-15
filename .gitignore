@@ -27,3 +27,10 @@ Thumbs.db
 *.sqlite
 *.db
 scratch/
+
+# SQLite sidecar files
+*.db-wal
+*.db-shm
+*.db-journal
+.pytest_cache/
+.ruff_cache/

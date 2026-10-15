@@ -15,14 +15,9 @@ from langgraph.graph import END, START, StateGraph
 from rich.console import Console
 
 from common.github import fetch_pr
-from common.llm import get_llm
-from common.schemas import (
-    AUTO_APPROVE_THRESHOLD,
-    ESCALATE_THRESHOLD,
-    PRAnalysis,
-    ReviewState,
-)
-
+from common.llm import get_llm, redact
+from common.review import analysis_messages, decide, ensure_analysis
+from common.schemas import PRAnalysis, ReviewState
 
 console = Console()
 
@@ -40,22 +35,19 @@ def node_fetch_pr(state: ReviewState) -> dict:
 
 def node_analyze(state: ReviewState) -> dict:
     console.print("[cyan]→ analyze[/cyan]")
-    # TODO: call the LLM with structured output PRAnalysis.
-    # Hint:  llm = get_llm().with_structured_output(PRAnalysis)
-    #        analysis = llm.invoke([...])
-    #        return {"analysis": analysis}
-    # When implemented, wrap the call in:
-    #        with console.status("[dim]LLM thinking...[/dim]"):
-    #            analysis = llm.invoke([...])
-    raise NotImplementedError("Implement node_analyze")
+    llm = get_llm().with_structured_output(PRAnalysis)
+    with console.status("[dim]LLM thinking...[/dim]"):
+        analysis = ensure_analysis(llm.invoke(analysis_messages(state)))
+    console.print(f"  [green]✓[/green] confidence={analysis.confidence:.0%}, {len(analysis.comments)} comment(s)")
+    return {"analysis": analysis}
 
 
 def node_route(state: ReviewState) -> dict:
     console.print("[cyan]→ route[/cyan]")
-    # TODO: read state["analysis"].confidence and return
-    #       {"decision": "auto_approve" | "human_approval" | "escalate"}
-    # Thresholds provided: AUTO_APPROVE_THRESHOLD (0.85) and ESCALATE_THRESHOLD (0.60).
-    raise NotImplementedError("Implement node_route")
+    c = state["analysis"].confidence
+    decision = decide(c)  # >= AUTO_APPROVE_THRESHOLD / < ESCALATE_THRESHOLD / in between
+    console.print(f"  [green]✓[/green] decision=[bold]{decision}[/bold] (confidence={c:.0%})")
+    return {"decision": decision}
 
 
 def node_auto_approve(state: ReviewState) -> dict:
@@ -75,11 +67,21 @@ def node_escalate(state: ReviewState) -> dict:
 
 def build_graph():
     g = StateGraph(ReviewState)
-    # TODO: add_node for the 6 nodes above (fetch_pr, analyze, route, auto_approve, human_approval, escalate)
-    # TODO: add_edge from START → fetch_pr → analyze → route
-    # TODO: add_conditional_edges on "route" with mapping
-    #       {"auto_approve": "auto_approve", "human_approval": "human_approval", "escalate": "escalate"}
-    # TODO: add_edge from each terminal node → END
+    for name, fn in [
+        ("fetch_pr", node_fetch_pr), ("analyze", node_analyze), ("route", node_route),
+        ("auto_approve", node_auto_approve), ("human_approval", node_human_approval),
+        ("escalate", node_escalate),
+    ]:
+        g.add_node(name, fn)
+    g.add_edge(START, "fetch_pr")
+    g.add_edge("fetch_pr", "analyze")
+    g.add_edge("analyze", "route")
+    g.add_conditional_edges(
+        "route", lambda s: s["decision"],
+        {"auto_approve": "auto_approve", "human_approval": "human_approval", "escalate": "escalate"},
+    )
+    for terminal in ("auto_approve", "human_approval", "escalate"):
+        g.add_edge(terminal, END)
     return g.compile()
 
 
@@ -92,11 +94,15 @@ def main() -> None:
     console.rule("[bold]Exercise 1 — confidence routing[/bold]")
     console.print(f"[dim]PR: {args.pr}[/dim]\n")
 
-    app = build_graph()
-    final = app.invoke({"pr_url": args.pr})
+    try:
+        final = build_graph().invoke({"pr_url": args.pr})
+    except Exception as e:  # GitHubError, ValueError (bad URL), LLM / config errors
+        console.print(f"[red]✗ {type(e).__name__}:[/red] {redact(e)}")
+        raise SystemExit(1)
 
     console.rule("Final")
     console.print(f"confidence = {final['analysis'].confidence:.0%}")
+    console.print(f"decision   = {final.get('decision')}")
     console.print(f"action     = {final.get('final_action')}")
 
 

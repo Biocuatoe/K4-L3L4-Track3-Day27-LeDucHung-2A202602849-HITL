@@ -4,6 +4,18 @@ import os
 
 from langchain_openai import ChatOpenAI
 
+SECRET_ENV_VARS = ("OPENROUTER_API_KEY", "GITHUB_TOKEN")
+
+
+def redact(text: object) -> str:
+    """Replace any configured secret value found in `text` (for logs / UI errors)."""
+    out = str(text)
+    for name in SECRET_ENV_VARS:
+        val = os.environ.get(name)
+        if val and len(val) >= 8:
+            out = out.replace(val, "***")
+    return out
+
 
 def get_llm(temperature: float = 0.2) -> ChatOpenAI:
     api_key = os.environ.get("OPENROUTER_API_KEY")

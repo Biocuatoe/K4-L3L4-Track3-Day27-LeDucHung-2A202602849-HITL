@@ -27,8 +27,15 @@ CREATE TABLE IF NOT EXISTS audit_events (
     reviewer_id       TEXT,
     decision          TEXT     NOT NULL,
     reason            TEXT,
-    execution_time_ms INTEGER  NOT NULL CHECK (execution_time_ms >= 0)
+    execution_time_ms INTEGER  NOT NULL CHECK (execution_time_ms >= 0),
+
+    -- Idempotency key: LangGraph re-runs an interrupted node from the top on
+    -- resume, so writers pass a deterministic key and duplicates are ignored.
+    -- NULL keys are always distinct (plain append).
+    event_key         TEXT
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS audit_events_event_key_uq ON audit_events (thread_id, event_key);
 
 CREATE INDEX IF NOT EXISTS audit_events_thread_idx   ON audit_events (thread_id, id);
 CREATE INDEX IF NOT EXISTS audit_events_pr_idx       ON audit_events (pr_url, timestamp DESC);

@@ -1,5 +1,5 @@
 """Shared types: the graph state, the LLM's structured analysis output,
-and the structured audit-trail entry written to PostgreSQL."""
+and the structured audit-trail entry written to SQLite."""
 
 from __future__ import annotations
 
@@ -8,13 +8,12 @@ from typing import Literal, TypedDict
 
 from pydantic import BaseModel, Field
 
-
 Decision = Literal["auto_approve", "human_approval", "escalate"]
 HumanChoice = Literal["approve", "reject", "edit"]
 
 
 # Confidence thresholds
-AUTO_APPROVE_THRESHOLD = 0.73   # >= 73% → no human, agent commits the comment directly
+AUTO_APPROVE_THRESHOLD = 0.73   # >= 73% → no human, agent posts the comment directly
 ESCALATE_THRESHOLD = 0.58       # < 58% → escalate: agent asks the reviewer specific questions
 # 58–72% inclusive → human approval flow (reviewer clicks Approve / Reject / Edit)
 
@@ -60,7 +59,7 @@ class PRAnalysis(BaseModel):
 
 
 class AuditEntry(BaseModel):
-    """One row of the PostgreSQL audit trail.
+    """One row of the SQLite audit trail.
 
     Designed as a structured *decision log* — one entry per meaningful event
     in a review session (LLM analysis, HITL interrupt, reviewer response,
@@ -115,6 +114,7 @@ class ReviewState(TypedDict, total=False):
     # Inputs
     pr_url: str
     thread_id: str
+    reviewer_id: str | None   # GitHub login of the human driving the session
 
     # Populated by fetch_pr
     pr_title: str
@@ -136,4 +136,6 @@ class ReviewState(TypedDict, total=False):
 
     # Populated by commit / final nodes
     posted_comment_body: str | None
+    comment_url: str | None   # permalink of the posted GitHub comment
+    post_error: str | None    # set when posting failed
     final_action: str | None

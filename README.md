@@ -7,7 +7,7 @@ A 2-hour lab that builds a human-in-the-loop pull-request review agent in **Lang
 > 3. Confidence ~58% → escalate: show context + specific questions for the reviewer.
 > 4. Every interaction is written to a SQLite audit trail; full sessions can be replayed.
 
-Students complete **4 exercises** (`exercises/`) that together build the full system. Each exercise has a runnable skeleton with `# TODO:` markers — your job is to fill them in.
+The four exercises (`exercises/`) plus the Streamlit app (`app.py`) together build the full system. All five are implemented.
 
 ## Background — what problem does this solve?
 
@@ -24,9 +24,9 @@ If you apply the same human-driven review process to all three, you burn senior 
 This lab builds an agent that auto-triages every PR:
 
 1. The LLM reads the diff and produces a structured review with a **self-reported confidence score**.
-2. **Confidence > 72%** → the agent posts the review comment itself; no human in the loop.
+2. **Confidence ≥ 73%** → the agent posts the review comment itself; no human in the loop.
 3. **58–72%** → the agent pauses (`interrupt()`) and shows the reviewer the diff + LLM reasoning + a one-click **approve / reject / edit** panel. On approve, the comment posts.
-4. **< 58%** → the agent **escalates strongly**. It shows the reviewer *specific questions the LLM is uncertain about* ("Why MD5? Is `SYNC_URL` meant to be HTTPS in production?") and waits for answers. Then it re-asks the LLM with the answers in context and posts a **refined** review.
+4. **< 58%** → the agent **escalates strongly**. It shows the reviewer *specific questions the LLM is uncertain about* ("Why MD5? Is `SYNC_URL` meant to be HTTPS in production?") and waits for answers. Then it re-asks the LLM with the answers in context, shows the **refined** review, and posts it only after the reviewer confirms.
 
 Every step writes a row to a structured audit table — every routing decision, every human interaction, every LLM call — so the team can replay any session for compliance or debugging.
 
@@ -36,13 +36,17 @@ Every step writes a row to a structured audit table — every routing decision, 
 flowchart TD
     Fetch[fetch_pr] --> Analyze[analyze]
     Analyze --> Route{confidence}
-    Route -- "> 72%" --> Auto[auto_approve]
+    Route -- ">= 73%" --> Auto[auto_approve]
     Route -- "58–72%" --> Human["human_approval<br/>(interrupt)"]
-    Route -- "< 58%" --> Escalate["escalate<br/>(interrupt)"]
-    Escalate --> Synth[synthesize]
-    Auto --> Commit[commit]
-    Human --> Commit
-    Synth --> Commit
+    Route -- "< 58%" --> Escalate["escalate<br/>(interrupt: questions)"]
+    Human -- approve / reject --> Commit[commit]
+    Human -- edit --> Revise["revise (LLM rewrites)"]
+    Escalate --> Synth["synthesize (LLM re-analysis)"]
+    Revise --> Confirm["confirm<br/>(interrupt: final approve / reject)"]
+    Synth --> Confirm
+    Confirm --> Commit
+    Auto --> End([END])
+    Commit --> End
 ```
 
 Every node also writes one row to `audit_events`. The graph state is persisted by `AsyncSqliteSaver`, so an interrupted session can resume from exactly where it stopped — even after the process is killed.
@@ -55,7 +59,7 @@ Every node also writes one row to `audit_events`. The graph state is persisted b
 - HITL agent
 - Approval UI (Streamlit)
 - Confidence-based routing
-- PostgreSQL audit trail
+- SQLite audit trail (the original brief said PostgreSQL)
 
 **What this scaffolding already covers.** Exercises 1–4 deliver the HITL agent, confidence-based routing, and the structured audit trail. Two implementation notes:
 - The lab uses **SQLite** (`./hitl_audit.db`) instead of PostgreSQL for zero-setup. The schema is row-oriented with first-class columns — the same `AuditEntry` queries transfer to Postgres in production by swapping the checkpointer and connection string.
@@ -65,11 +69,11 @@ Every node also writes one row to `audit_events`. The graph state is persisted b
 
 | Confidence  | Branch           | Has HITL?                          | Demo PR |
 |-------------|------------------|------------------------------------|---------|
-| > 72%       | `auto_approve`   | No — agent commits directly        | (use any tiny PR) |
+| ≥ 73%       | `auto_approve`   | No — agent commits directly        | (use any tiny PR) |
 | 58–72%      | `human_approval` | Yes — approve / reject / edit      | PR-Demo #1 |
 | < 58%       | `escalate`       | Yes — answer specific questions    | PR-Demo #2 |
 
-Thresholds live in `common/schemas.py` (`AUTO_APPROVE_THRESHOLD = 0.73`, `ESCALATE_THRESHOLD = 0.58`).
+Thresholds live in `common/schemas.py` (`AUTO_APPROVE_THRESHOLD = 0.73`, `ESCALATE_THRESHOLD = 0.58`): `>= 0.73` auto, `0.58 <= c < 0.73` human approval, `< 0.58` escalate. Confidence is **model-generated** and varies between runs — routing is deterministic given the number, but the number is not.
 
 ## Layout
 
@@ -79,13 +83,16 @@ Thresholds live in `common/schemas.py` (`AUTO_APPROVE_THRESHOLD = 0.73`, `ESCALA
 ├── pyproject.toml
 ├── .env.example
 │
-├── common/                  # shared utilities — provided, don't modify
+├── common/                  # shared utilities
 │   ├── llm.py               # ChatOpenAI factory (OpenRouter)
 │   ├── github.py            # httpx REST API client: fetch_pr / post_review_comment
 │   ├── db.py                # aiosqlite connection + write_audit_event
+│   ├── review.py            # prompts, routing, payload validation, comment rendering
 │   └── schemas.py           # ReviewState (TypedDict) + PRAnalysis + AuditEntry (Pydantic)
 │
-├── exercises/               # YOUR WORK — skeleton code with TODOs
+├── app.py + review_service.py   # Exercise 5: Streamlit UI + graph service layer
+├── tests/                   # pytest suite (mocked I/O)
+├── exercises/               # the four exercises
 │   ├── exercise_1_confidence.py
 │   ├── exercise_2_hitl.py
 │   ├── exercise_3_escalation.py
@@ -126,14 +133,14 @@ The agent calls the GitHub REST API directly to **read PR diffs** and **post rev
    ```
    If you see `"full_name": "VinUni-AI20k/PR-Demo"` → OK. `401` → wrong scope or typo.
 
-**Security:** `.env` is git-ignored. Each student uses **their own** PAT — comments show their username, so the instructor can see who approved what.
+**Security:** `.env` is git-ignored; never commit a token. Use a classic PAT with only `public_repo` (or a fine-grained token limited to Issues read/write and Pull requests read on the target repo), a short expiry, and revoke it after the lab. Comments are posted under the token owner's account. Errors shown in the CLI/UI pass through a redactor that strips configured secret values.
 
 ## Setup (once)
 
 ```bash
 git clone <lab-repo-url> && cd Day27-Track3-HITL
 uv sync                                     # install Python deps
-cp .env.example .env && $EDITOR .env        # set OPENROUTER_API_KEY and GITHUB_TOKEN
+cp .env.example .env && $EDITOR .env        # set OPENROUTER_API_KEY and GITHUB_TOKEN (GITHUB_USER optional)
 ```
 
 The SQLite file `hitl_audit.db` is created on demand when exercise 4 runs.
@@ -151,7 +158,7 @@ PR #1 is mechanical (~40 lines) with one open question (schema migration). PR #2
 
 ## The 5 exercises
 
-Do them in order — each builds on the previous. Open the file, read all `# TODO:` comments top-to-bottom, fill them in, then run the command shown.
+Do them in order — each builds on the previous. Each section names what is implemented; run the command shown.
 
 ### Exercise 1 — Confidence routing (`exercise_1_confidence.py`)
 
@@ -243,29 +250,58 @@ The same three confidence buckets apply, but the *human experience* changes per 
 
 | Confidence | Branch | What the reviewer sees in the UI |
 |---|---|---|
-| **> 72%** | `auto_approve` | A success card: confidence + LLM summary + a "View comment on GitHub" link. Reviewer does **nothing** — agent already posted. |
+| **≥ 73%** | `auto_approve` | A success card: confidence + LLM summary + a "View comment on GitHub" link. Reviewer does **nothing** — agent already posted. |
 | **58–72%** | `human_approval` | The normal approval card: diff, LLM reasoning, list of comments + three buttons **Approve / Reject / Edit**. One click and the comment posts. |
 | **< 58%** | `escalate` | The strong-escalation card: risk factors highlighted + a form with the LLM's specific questions. Reviewer fills answers, agent re-synthesizes, then shows the refined review for a final confirm. |
 
-**You implement** (`app.py` at the repo root):
+**Implemented in** `app.py` (UI) + `review_service.py` (graph I/O, testable without a browser):
 
 - A PR URL input form → trigger the graph.
 - An `interrupt()` handler that renders the right card depending on `payload["kind"]` (`approval_request` vs `escalation`).
 - A resume call: `app.ainvoke(Command(resume=user_choice_or_answers), cfg)`.
 - `thread_id` persisted in `st.session_state` so reloading the page or jumping back to it keeps the session.
 - A small "recent sessions" sidebar driven by `audit.replay.list_threads`.
-- Add `streamlit` to `pyproject.toml` dependencies.
 
-A skeleton with `# TODO:` markers is provided in `app.py`. Run with:
+Run with:
 
 ```bash
 uv run streamlit run app.py
 ```
 
-The skeleton wires up the Streamlit boilerplate (session state, page layout, top-level form). You fill in:
-- The graph invocation
-- The two interrupt renderers (`render_approval_card`, `render_escalation_card`)
-- The resume logic
+### What the implementation does
+
+- **Start:** URL form with validation → new `thread_id` per review → real Exercise 4 graph on `AsyncSqliteSaver`.
+- **Approval card:** confidence + reasoning, summary, comments with severity, diff preview, **Approve & post / Reject / Edit**. Edit requires feedback; the LLM revises the review and the reviewer confirms before anything is posted.
+- **Escalation card:** highlighted risk factors, one input per question (all required) → refined review → **Confirm & post / Don't post**.
+- **Result:** distinguishes *posted* (with a link to the GitHub comment), *rejected*, and *posting failed* (shows the error; never a false success). Outcomes are classified by exact `final_action` value, not by prefix.
+- **Recent sessions (sidebar):** from `audit_events` (`common.db.list_sessions`): PR, latest event, worst risk, event count. Clicking one restores the persisted graph state and re-shows any pending interrupt on the **same** `thread_id`. The id is also kept in `?thread=<id>` so a browser reload resumes the same session.
+- **Safety:** resume payloads are validated against the pending interrupt before they reach the graph, and a resume for a thread that is no longer waiting (double click, stale tab) is refused, so a decision can not be applied — or a comment posted — twice.
+
+## Final-action values
+
+| `final_action` | Meaning |
+|---|---|
+| `auto_approved` | ≥ 73%: comment posted automatically |
+| `committed` / `committed_after_escalation` | reviewer approved; comment posted |
+| `rejected` | reviewer declined; nothing posted |
+| `auto_commit_failed` / `commit_failed` | **posting failed** (`post_error` holds the reason) |
+
+## Tests
+
+```bash
+uv run pytest -q          # 76 tests; all external I/O (GitHub, LLM) is mocked, temp SQLite files only
+uv run ruff check .
+```
+
+The suite covers schema/routing boundaries, GitHub URL parsing and HTTP failures, approve/reject/edit/escalation flows (Ex 2–4), audit contents and "exactly once across pause/resume", worst-risk ranking, schema migration, checkpoint restoration, and the Streamlit app via `streamlit.testing` (no browser). It never posts to a real PR.
+
+## Audit trail details
+
+- Replay: `uv run python -m audit.replay --thread <id>`; list: `uv run python -m audit.replay --list` (shows latest event and **ranked** worst risk: high > med > low).
+- **Resume correctness.** LangGraph re-runs an interrupted node from its first line on resume. Every audit row has a deterministic `event_key` (its action name) with `UNIQUE(thread_id, event_key)` + `INSERT OR IGNORE`, so the "before interrupt" row is written once. Older databases are migrated in place (`ALTER TABLE ... ADD COLUMN event_key`). Posting to GitHub happens only in `commit` / `auto_approve`, never before an `interrupt()`.
+- Event `action`s: `fetch_pr, analyze, route, human_approval, human_approval_response, revise, confirm, confirm_response, escalate, escalate_answers, synthesize, commit | commit_failed, auto_approve | auto_approve_failed`. `decision` is one of `pending, approve, reject, edit, escalate, auto`.
+- Rows hold counts, confidences and short reasons only — never the diff or any secret. `reviewer_id` is `GITHUB_USER`, else the login owning `GITHUB_TOKEN`, else `unknown`.
+- Known limitation: because the key is the action name, a retried *identical* failure within one thread is not logged a second time.
 
 ## How the assignment maps to files
 
@@ -294,13 +330,13 @@ You forgot `checkpointer=...` in `.compile()`. Checkpointer is required for `int
 `thread_id` mismatch between the original `invoke` and the resuming `Command` call. Always print `thread_id` and use the same one when resuming.
 
 **Duplicate review comments posted after resume.**
-Side-effects placed *before* `interrupt()` in the same node — the node re-runs from the top after resume. Move side-effects to a downstream node (e.g. `commit`).
+Side-effects placed *before* `interrupt()` in the same node — the node re-runs from the top after resume. Move side-effects to a downstream node (e.g. `commit`). Audit rows written before `interrupt()` are protected by the unique `event_key`.
 
-**`post_review_comment` returns 403 / 404.**
+**`post_review_comment` raises `GitHubError` (403 / 404).**
 Token lacks `public_repo` scope, or repo is private and you only have `public_repo`. Re-create the PAT with the right scope.
 
 **LLM stays overconfident on PR #2 and never escalates.**
-Temporarily raise `ESCALATE_THRESHOLD` in `common/schemas.py` to 0.70 to force the branch.
+Confidence is model output and is never forced. Exercise the branch deterministically with the mocked tests; for a live demo you may temporarily raise `ESCALATE_THRESHOLD` in `common/schemas.py`.
 
 **`audit_events` schema is stale after a code change.**
 The schema is created idempotently on first connection. To reset state completely, just delete the file:
@@ -308,7 +344,26 @@ The schema is created idempotently on first connection. To reset state completel
 rm hitl_audit.db
 ```
 
+**Environment variables** (`.env`): `OPENROUTER_API_KEY` (required), `LLM_MODEL` (default `openai/gpt-4o-mini`), `LLM_BASE_URL` (default OpenRouter), `GITHUB_TOKEN` (required), `GITHUB_USER` (optional reviewer id), `HITL_DB_PATH` (optional DB file).
+
 **Open the SQLite file to inspect manually.**
 ```bash
 sqlite3 hitl_audit.db "SELECT action, confidence, decision, reviewer_id FROM audit_events ORDER BY id;"
 ```
+
+## Validation results
+
+Run on 2026-10-15 (Windows, `uv`):
+
+| Check | Result |
+|---|---|
+| `uv run pytest -q` | **76 passed** |
+| `compileall`, `uv lock --check`, `uv run ruff check .` | clean |
+| `uv run python -m audit.replay --list` / `--thread` | works; replayed a real session (below) |
+| `uv run streamlit run app.py` | server starts, `/_stcore/health` returns 200; UI flows covered headlessly by `tests/test_app.py` |
+| **Live GitHub** (`fetch_pr` on PR-Demo #1 and #2 with the real PAT) | works (3 and 4 files fetched) |
+| **Live LLM** (OpenRouter, Exercises 1–4 on the demo PRs) | **not performed — blocked.** OpenRouter returned `402 Insufficient credits` for the configured key; the `:free` slugs I tried returned 404. No live confidence values were observed, so the "~65%" / "<58%" expectations for PR #1/#2 are **unverified**. |
+| Real GitHub fetch + stub LLM + real SQLite, reject path (nothing posted) | passed: `fetch_pr, analyze, route, human_approval, human_approval_response, commit`, each once across the interrupt/resume; reviewer = `GITHUB_USER` |
+| Live comment posting to a PR | **not performed** (needs a working LLM key). Posting, including HTTP failure → `commit_failed`, is covered by mocked tests. |
+
+Once the OpenRouter account has credit, the live checks are the commands in each exercise section, then `uv run streamlit run app.py`.
