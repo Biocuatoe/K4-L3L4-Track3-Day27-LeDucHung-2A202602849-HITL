@@ -3,11 +3,11 @@
 A 2-hour lab that builds a human-in-the-loop pull-request review agent in **LangGraph**, end-to-end.
 
 > 1. Agent reads a PR, analyzes code changes, proposes review comments.
-> 2. Confidence ~72% → show diff + reasoning → user approves → agent commits the review.
-> 3. Confidence ~58% → escalate: show context + specific questions for the reviewer.
+> 2. Confidence 58–72% → show diff + reasoning → reviewer approves / rejects / edits → agent commits the review.
+> 3. Confidence < 58% → escalate: show context + specific questions for the reviewer; re-analyze with the answers.
 > 4. Every interaction is written to a SQLite audit trail; full sessions can be replayed.
 
-The four exercises (`exercises/`) plus the Streamlit app (`app.py`) together build the full system. All five are implemented.
+The four exercises (`exercises/`) plus the Streamlit app (`app.py`, graph operations in `review_service.py`) together form the full system. **All five are implemented and tested** (see [Validation results](#validation-results) for exactly what was verified live and what only with mocks).
 
 ## Background — what problem does this solve?
 
@@ -55,25 +55,21 @@ Every node also writes one row to `audit_events`. The graph state is persisted b
 
 **Goal:** Build a HITL agent with LangGraph `interrupt()` **+ a Streamlit approval UI**.
 
-**Deliverables:**
-- HITL agent
-- Approval UI (Streamlit)
-- Confidence-based routing
-- SQLite audit trail (the original brief said PostgreSQL)
-
-**What this scaffolding already covers.** Exercises 1–4 deliver the HITL agent, confidence-based routing, and the structured audit trail. Two implementation notes:
-- The lab uses **SQLite** (`./hitl_audit.db`) instead of PostgreSQL for zero-setup. The schema is row-oriented with first-class columns — the same `AuditEntry` queries transfer to Postgres in production by swapping the checkpointer and connection string.
-- The approval UI is currently a terminal panel (Rich). The Streamlit UI is the fifth exercise — see [Exercise 5](#exercise-5--streamlit-approval-ui-apppy) below.
+**Deliverables (all implemented):**
+- HITL agent — LangGraph with `interrupt()` / `Command(resume=...)` (Exercises 2–4)
+- Confidence-based routing (Exercise 1, shared by 2–4)
+- Approval UI — a Streamlit app, `app.py`, backed by `review_service.py` (Exercise 5). Exercises 2–3 also have terminal (Rich) prompts for quick demos.
+- Audit trail — structured SQLite table `audit_events` plus a durable LangGraph SQLite checkpointer (Exercise 4). The original brief said PostgreSQL; SQLite is used for zero setup, and the `AuditEntry` queries transfer to Postgres.
 
 ## Confidence routing
 
 | Confidence  | Branch           | Has HITL?                          | Demo PR |
 |-------------|------------------|------------------------------------|---------|
-| ≥ 73%       | `auto_approve`   | No — agent commits directly        | (use any tiny PR) |
-| 58–72%      | `human_approval` | Yes — approve / reject / edit      | PR-Demo #1 |
-| < 58%       | `escalate`       | Yes — answer specific questions    | PR-Demo #2 |
+| ≥ 73%       | `auto_approve`   | No — agent posts directly          | any small, clear PR |
+| 58% ≤ c < 73% | `human_approval` | Yes — approve / reject / edit    | PR-Demo #1 (example) |
+| < 58%       | `escalate`       | Yes — answer specific questions    | PR-Demo #2 (example) |
 
-Thresholds live in `common/schemas.py` (`AUTO_APPROVE_THRESHOLD = 0.73`, `ESCALATE_THRESHOLD = 0.58`): `>= 0.73` auto, `0.58 <= c < 0.73` human approval, `< 0.58` escalate. Confidence is **model-generated** and varies between runs — routing is deterministic given the number, but the number is not.
+Thresholds live in `common/schemas.py` (`AUTO_APPROVE_THRESHOLD = 0.73`, `ESCALATE_THRESHOLD = 0.58`): `>= 0.73` auto, `0.58 <= c < 0.73` human approval, `< 0.58` escalate. Confidence is **model-generated** and varies between runs — routing is deterministic given the number, but the number is not. The demo-PR column is an *example*, not a guarantee.
 
 ## Layout
 
@@ -84,7 +80,8 @@ Thresholds live in `common/schemas.py` (`AUTO_APPROVE_THRESHOLD = 0.73`, `ESCALA
 ├── .env.example
 │
 ├── common/                  # shared utilities
-│   ├── llm.py               # ChatOpenAI factory (OpenRouter)
+│   ├── llm.py               # ChatOpenAI factory: Groq or OpenRouter (explicit LLM_PROVIDER), secret redaction
+│   ├── checkpoint.py        # SQLite / in-memory checkpointers with an explicit msgpack allow-list
 │   ├── github.py            # httpx REST API client: fetch_pr / post_review_comment
 │   ├── db.py                # aiosqlite connection + write_audit_event
 │   ├── review.py            # prompts, routing, payload validation, comment rendering
@@ -98,16 +95,16 @@ Thresholds live in `common/schemas.py` (`AUTO_APPROVE_THRESHOLD = 0.73`, `ESCALA
 │   ├── exercise_3_escalation.py
 │   └── exercise_4_audit.py
 │
-└── audit/                   # provided
+└── audit/                   # audit schema + replay CLI
     ├── schema.sql           # CREATE TABLE audit_events
-    └── replay.py            # `python -m audit.replay --thread <id>` / --list
+    └── replay.py            # `python -m audit.replay --thread <id>` / --list  (worst risk ranked high > med > low)
 ```
 
 ## Prerequisites
 
 - Python 3.11+
 - [uv](https://docs.astral.sh/uv/) package manager
-- An LLM API key: [Groq](https://console.groq.com/keys) (free tier, default) or [OpenRouter](https://openrouter.ai/keys). Select with `LLM_PROVIDER=groq|openrouter`.
+- An LLM API key: [Groq](https://console.groq.com/keys) (free tier; used for the documented live verification) or [OpenRouter](https://openrouter.ai/keys). Select explicitly with `LLM_PROVIDER=groq|openrouter`.
 - A GitHub Personal Access Token — see next section
 
 No Docker, no Postgres install, no `gh` CLI. The agent talks to GitHub directly via the REST API. Audit + checkpointer state both live in a single SQLite file (`./hitl_audit.db`) created automatically on first run.
@@ -140,44 +137,44 @@ The agent calls the GitHub REST API directly to **read PR diffs** and **post rev
 ```bash
 git clone <lab-repo-url> && cd Day27-Track3-HITL
 uv sync                                     # install Python deps
-cp .env.example .env && $EDITOR .env        # set OPENROUTER_API_KEY and GITHUB_TOKEN (GITHUB_USER optional)
+cp .env.example .env && $EDITOR .env        # set LLM_PROVIDER, the matching *_API_KEY, GITHUB_TOKEN (GITHUB_USER optional)
 ```
 
-The SQLite file `hitl_audit.db` is created on demand when exercise 4 runs.
+The SQLite file `hitl_audit.db` is created on demand when Exercise 4 or the Streamlit app runs. Run the test suite any time with `uv run pytest -q` (no keys needed).
 
 ## Demo PRs
 
 Two PRs are kept at the public repo **<https://github.com/VinUni-AI20k/PR-Demo>** for testing:
 
-| PR | URL                                                                  | Expected branch          |
+| PR | URL                                                                  | Example branch (model-dependent) |
 |----|----------------------------------------------------------------------|--------------------------|
-| #1 — Add task priority field        | `https://github.com/VinUni-AI20k/PR-Demo/pull/1` | `human_approval` (~65%) |
-| #2 — Add user login + cloud sync    | `https://github.com/VinUni-AI20k/PR-Demo/pull/2` | `escalate` (<58%)       |
+| #1 — Add task priority field        | `https://github.com/VinUni-AI20k/PR-Demo/pull/1` | `human_approval` (observed 65–68%, but one run scored ≥73%) |
+| #2 — Add user login + cloud sync    | `https://github.com/VinUni-AI20k/PR-Demo/pull/2` | `escalate` (observed 53–55%, but two runs scored ≥73%) |
 
-PR #1 is mechanical (~40 lines) with one open question (schema migration). PR #2 has multiple red flags (MD5 password hashing, plaintext token storage, SQL injection in `Storage.add`, hard-coded user_id, no tests for new code) — the LLM should drop into the escalate branch and ask the reviewer specific questions.
+PR #1 is mechanical (~40 lines) with one open question (schema migration). PR #2 has multiple red flags (MD5 password hashing, plaintext token storage, SQL injection in `Storage.add`, hard-coded user_id, no tests for new code) — the LLM often (not always) drops into the escalate branch and asks the reviewer specific questions.
 
 ## The 5 exercises
 
-Do them in order — each builds on the previous. Each section names what is implemented; run the command shown.
+Each exercise builds on the previous one. Exercise 1 alone is only analysis + routing; HITL pauses, escalation, audit persistence and resume come from Exercises 2–4, and the UI from Exercise 5. Each section says what the file implements and how to run it.
 
 ### Exercise 1 — Confidence routing (`exercise_1_confidence.py`)
 
 Build a small LangGraph that fetches a PR, analyzes it, then routes to one of three terminal nodes by confidence (`auto_approve` / `human_approval` / `escalate`). No HITL yet — terminals just print which branch fired.
 
-**You implement:** `node_analyze` (call LLM with `with_structured_output(PRAnalysis)`), `node_route` (return decision string), and the graph wiring (`add_node`, `add_edge`, `add_conditional_edges`).
+**Implements:** `node_analyze` (LLM with `with_structured_output(PRAnalysis)`, diff treated as untrusted input), `node_route` (shared thresholds), and the graph wiring. It only analyzes and routes — it never posts to GitHub. Errors (bad URL, GitHub/LLM failures, invalid structured output) print a clean message.
 
 ```bash
 uv run python exercises/exercise_1_confidence.py --pr https://github.com/VinUni-AI20k/PR-Demo/pull/1
 uv run python exercises/exercise_1_confidence.py --pr https://github.com/VinUni-AI20k/PR-Demo/pull/2
 ```
 
-Success = the two PRs print **different** branches.
+Typical result: the two PRs print different branches, but confidence is model-generated, so this is not guaranteed (see Validation results).
 
 ### Exercise 2 — HITL with `interrupt()` (`exercise_2_hitl.py`)
 
-Turn the `human_approval` node from a placeholder into a real pause-and-ask. Use `interrupt(payload)` inside the node, then resume the graph from `main()` with `Command(resume=<user_answer>)`.
+`human_approval` is a real pause-and-ask: `interrupt(payload)` inside the node, then the graph is resumed from `main()` with `Command(resume=<user_answer>)` on the same `thread_id`. Choices: **approve** (post), **reject** (post nothing), **edit** (reviewer feedback → the LLM rewrites the review → a second `final_confirmation` interrupt → only an explicit approve posts). The escalate branch is still a placeholder in this file.
 
-**You implement:** `node_human_approval` (call `interrupt()` with diff + reasoning), graph compile with `MemorySaver` checkpointer, and the resume loop in `main()`:
+**Implements:** `node_human_approval`, `node_revise`, `node_confirm`, the graph compiled with an in-memory checkpointer, and the resume loop in `main()`:
 ```python
 while "__interrupt__" in result:
     payload = result["__interrupt__"][0].value
@@ -192,9 +189,9 @@ uv run python exercises/exercise_2_hitl.py --pr https://github.com/VinUni-AI20k/
 
 ### Exercise 3 — Escalation with reviewer Q&A (`exercise_3_escalation.py`)
 
-When confidence is low, the agent shouldn't ask "approve/reject" — it should ask **specific questions** to gather context, then re-run the analysis with the answers.
+When confidence is low, the agent asks **specific questions** (2–4, naming files / risks) instead of approve/reject, re-runs the analysis with the answers, shows the refined review, and posts only after the reviewer confirms: `escalate → synthesize → confirm → commit`.
 
-**You implement:** prompt the LLM to populate `escalation_questions` when low-confidence, `node_escalate` (calls `interrupt(kind="escalation")` with the questions), and `node_synthesize` (re-prompts the LLM using the reviewer's answers to produce a refined review).
+**Implements:** the shared prompt that makes the LLM populate `escalation_questions` when confidence is low, `node_escalate` (`interrupt` with kind `escalation`; answers validated as `{question: non-blank answer}`), `node_synthesize` (re-prompt with the original diff, initial analysis and every answer), and the confirm step. The approve / reject / edit branch from Exercise 2 is included.
 
 ```bash
 uv run python exercises/exercise_3_escalation.py --pr https://github.com/VinUni-AI20k/PR-Demo/pull/2
@@ -224,7 +221,7 @@ SELECT AVG(confidence) FROM audit_events WHERE decision = 'approve';
 SELECT * FROM audit_events WHERE risk_level = 'high' AND decision = 'auto';   -- shouldn't happen!
 ```
 
-**You implement:** the `audit(...)` helper (calls `write_audit_event(thread_id=..., pr_url=..., entry=AuditEntry(...))`) and construct an `AuditEntry` in every node. The `AsyncSqliteSaver` and resume loop are already wired for you in `run()`.
+**Implements:** the `audit(...)` helper (calls `write_audit_event(thread_id=..., pr_url=..., entry=AuditEntry(...), event_key=...)`), an `AuditEntry` in every node, the `AsyncSqliteSaver` checkpointer, and a CLI resume loop (`--thread <id>` continues an existing session instead of starting a new one). This is the graph the Streamlit app runs.
 
 ```bash
 uv run python exercises/exercise_4_audit.py --pr https://github.com/VinUni-AI20k/PR-Demo/pull/1
@@ -244,7 +241,7 @@ Both live in the same `./hitl_audit.db` file. The assignment line "ghi vào audi
 
 ### Exercise 5 — Streamlit approval UI (`app.py`)
 
-The final assembly: wrap the LangGraph from exercises 1–4 into a **Streamlit** web UI so a reviewer can drive the whole flow from a browser instead of a terminal.
+The final assembly: the Exercise 4 graph behind a **Streamlit** web UI so a reviewer can drive the whole flow from a browser.
 
 The same three confidence buckets apply, but the *human experience* changes per bucket:
 
@@ -254,13 +251,7 @@ The same three confidence buckets apply, but the *human experience* changes per 
 | **58–72%** | `human_approval` | The normal approval card: diff, LLM reasoning, list of comments + three buttons **Approve / Reject / Edit**. One click and the comment posts. |
 | **< 58%** | `escalate` | The strong-escalation card: risk factors highlighted + a form with the LLM's specific questions. Reviewer fills answers, agent re-synthesizes, then shows the refined review for a final confirm. |
 
-**Implemented in** `app.py` (UI) + `review_service.py` (graph I/O, testable without a browser):
-
-- A PR URL input form → trigger the graph.
-- An `interrupt()` handler that renders the right card depending on `payload["kind"]` (`approval_request` vs `escalation`).
-- A resume call: `app.ainvoke(Command(resume=user_choice_or_answers), cfg)`.
-- `thread_id` persisted in `st.session_state` so reloading the page or jumping back to it keeps the session.
-- A small "recent sessions" sidebar driven by `audit.replay.list_threads`.
+**Implemented in** `app.py` (UI) and `review_service.py` (graph I/O: `start_review`, `resume_review`, `load_session`, `continue_session`; testable without a browser).
 
 Run with:
 
@@ -270,7 +261,7 @@ uv run streamlit run app.py
 
 ### What the implementation does
 
-- **Start:** URL form with validation → new `thread_id` per review → real Exercise 4 graph on `AsyncSqliteSaver`.
+- **Start:** URL form with validation → new `thread_id` per review → the real Exercise 4 graph on the SQLite checkpointer.
 - **Approval card:** confidence + reasoning, summary, comments with severity, diff preview, **Approve & post / Reject / Edit**. Edit requires feedback; the LLM revises the review and the reviewer confirms before anything is posted.
 - **Escalation card:** highlighted risk factors, one input per question (all required) → refined review → **Confirm & post / Don't post**.
 - **Result:** distinguishes *posted* (with a link to the GitHub comment), *rejected*, and *posting failed* (shows the error; never a false success). Outcomes are classified by exact `final_action` value, not by prefix.
@@ -289,11 +280,11 @@ uv run streamlit run app.py
 ## Tests
 
 ```bash
-uv run pytest -q          # 76 tests; all external I/O (GitHub, LLM) is mocked, temp SQLite files only
+uv run pytest -q          # 84 tests; all external I/O (GitHub, LLM) is mocked, temp SQLite files only
 uv run ruff check .
 ```
 
-The suite covers schema/routing boundaries, GitHub URL parsing and HTTP failures, approve/reject/edit/escalation flows (Ex 2–4), audit contents and "exactly once across pause/resume", worst-risk ranking, schema migration, checkpoint restoration, and the Streamlit app via `streamlit.testing` (no browser). It never posts to a real PR.
+The suite covers schema/routing boundaries, GitHub URL parsing and HTTP failures, approve/reject/edit/escalation flows (Ex 2–4), audit contents and "exactly once across pause/resume", worst-risk ranking, schema migration, checkpoint restoration (without the deserialization warning), Groq/OpenRouter provider selection and secret redaction, and the Streamlit app via `streamlit.testing` (no browser). It never posts to a real PR.
 
 ## Audit trail details
 
@@ -305,12 +296,12 @@ The suite covers schema/routing boundaries, GitHub URL parsing and HTTP failures
 
 ## How the assignment maps to files
 
-| Assignment line                                       | Where you implement it                              |
+| Assignment line                                       | Where it is implemented                             |
 |-------------------------------------------------------|----------------------------------------------------|
 | Agent reads PR, analyzes, proposes comments           | `exercise_1_confidence.py` (analyze + routing)     |
-| Confidence-based routing (72% vs 58% etc.)            | `common/schemas.py` thresholds + `exercise_1`      |
-| 72% → diff + reasoning → user approves → commit       | `exercise_2_hitl.py`                                |
-| 58% → escalate with specific questions                | `exercise_3_escalation.py`                          |
+| Confidence-based routing (73% / 58%)                  | `common/schemas.py` thresholds + `exercise_1`      |
+| 58–72% → diff + reasoning → user approves → commit    | `exercise_2_hitl.py`                                |
+| <58% → escalate with specific questions               | `exercise_3_escalation.py`                          |
 | Audit trail + replay full session                     | `exercise_4_audit.py`, `audit/schema.sql`, `audit/replay.py` |
 | Streamlit approval UI (final assembly)                | `app.py`                                            |
 
@@ -319,7 +310,7 @@ The suite covers schema/routing boundaries, GitHub URL parsing and HTTP failures
 1. **Time-travel.** Use `app.aget_state_history(config)` to list every checkpoint. Resume from an earlier checkpoint with a different reviewer answer and compare outcomes.
 2. **Confidence calibration.** After N sessions, query `audit_events` to compute `AVG(confidence)` vs `count(human_choice = 'approve')`. Is the model over- or under-confident?
 3. **Multi-reviewer fan-out.** Use the `Send` API to escalate the same questions to two reviewers (two threads) and wait for both.
-4. **Auto-edit.** When the human chooses `edit`, call the LLM again to rewrite the review using `human_feedback`, then commit.
+4. ~~Auto-edit~~ — already implemented (Edit → LLM revision → final confirmation).
 
 ## FAQ / gotchas
 
@@ -357,16 +348,14 @@ Run on 2026-10-15 (Windows, `uv`):
 
 | Check | Result |
 |---|---|
-| `uv run pytest -q` | **83 passed** |
+| `uv run pytest -q` | **84 passed** (mocked GitHub + LLM) |
 | `compileall`, `uv lock --check`, `uv run ruff check .` | clean |
 | `uv run python -m audit.replay --list` / `--thread` | works; replayed a real session (below) |
 | `uv run streamlit run app.py` | server starts, `/_stcore/health` returns 200; UI flows covered headlessly by `tests/test_app.py` |
 | **Live GitHub** (`fetch_pr` on PR-Demo #1 and #2 with the real PAT) | works (3 and 4 files fetched) |
-| Live LLM on OpenRouter (initial run) | superseded by the Groq verification below. Originally blocked: OpenRouter returned `402 Insufficient credits` for the configured key; the `:free` slugs I tried returned 404. No live confidence values were observed, so the "~65%" / "<58%" expectations for PR #1/#2 are **unverified**. |
+| Live LLM — *historical* | The first attempt used OpenRouter, whose key had no credits (`402`); that is no longer a blocker. Live LLM verification was redone with Groq (next section). |
 | Real GitHub fetch + stub LLM + real SQLite, reject path (nothing posted) | passed: `fetch_pr, analyze, route, human_approval, human_approval_response, commit`, each once across the interrupt/resume; reviewer = `GITHUB_USER` |
-| Live comment posting to a PR | **not performed** (needs a working LLM key). Posting, including HTTP failure → `commit_failed`, is covered by mocked tests. |
-
-Once the OpenRouter account has credit, the live checks are the commands in each exercise section, then `uv run streamlit run app.py`.
+| Live comment posting to a PR | **never performed, by design.** Posting, including HTTP failure → `commit_failed`, is covered by mocked tests only. |
 
 ### Groq live verification (2026-10-15)
 
@@ -387,4 +376,8 @@ Provider `groq`, model **`openai/gpt-oss-120b`**, `https://api.groq.com/openai/v
 
 Confidence is model-generated and **varied between runs** on the same PR (PR #2: 55% in Exercise 1, 53% in Exercise 3, ≥73% in Exercise 4 and the UI run), so the demo PRs do not reliably land in a given branch; the expected branches above are not guaranteed. No thresholds or scores were altered.
 
-Remaining: no real GitHub comment post was tested (intentionally). LangGraph prints a deprecation-style warning about deserializing `common.schemas.PRAnalysis` from checkpoints ("will be blocked in a future version"); it is harmless today.
+Remaining limitations:
+- No real GitHub comment was ever posted; all live runs stubbed the POST.
+- Live-verified only: the Exercise 1 commands, an Exercise 3 escalation → re-analysis → confirmation run, an Exercise 4 approve run and an auto-approve run, and the Streamlit approval-card and auto-approve paths. **Not exercised live** (mocked tests only): Reject and Edit branches, the Streamlit escalation card, the Streamlit Edit flow.
+- **Checkpoint deserialization warning (fixed after the live runs above).** LangGraph warned `Deserializing unregistered type common.schemas.PRAnalysis from checkpoint. This will be blocked in a future version` — a genuine forward-compatibility issue (a future LangGraph would refuse to load our checkpoints). It is now fixed the supported way: `common/checkpoint.py` registers `PRAnalysis` and `ReviewComment` in an explicit `allowed_msgpack_modules` allow-list (no permissive/unsafe mode), used by all exercises and the service; a test asserts a SQLite checkpoint round-trip emits no such warning. This fix was verified with mocked tests, not re-run against live Groq.
+- Audit `event_key` is the action name, so a retried identical failure within one thread is logged once.

@@ -13,9 +13,9 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator
 
-from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.types import Command
 
+from common.checkpoint import sqlite_saver
 from common.db import db_path
 from common.github import parse_pr_url
 from common.review import classify_outcome, pending_interrupt, validate_answers, validate_choice
@@ -42,7 +42,7 @@ class SessionView:
 
 @asynccontextmanager
 async def _graph() -> AsyncIterator:
-    async with AsyncSqliteSaver.from_conn_string(db_path()) as cp:
+    async with sqlite_saver(db_path()) as cp:
         await cp.setup()
         yield build_graph(cp)
 

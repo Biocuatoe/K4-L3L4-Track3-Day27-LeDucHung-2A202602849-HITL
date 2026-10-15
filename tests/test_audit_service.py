@@ -261,3 +261,13 @@ async def test_replay_cli_functions_run(install, capsys):
     await replay.replay(tid)
     out = capsys.readouterr().out
     assert tid[:8] in out and "auto_approve" in out
+
+
+async def test_checkpoint_roundtrip_has_no_deserialization_warning(install, caplog):
+    install(ex4, [make_analysis(0.65)])
+    tid = svc.new_thread_id()
+    await svc.start_review(PR_URL, tid)
+    with caplog.at_level("WARNING"):
+        v = await svc.load_session(tid)  # reads PRAnalysis back from the SQLite checkpoint
+    assert v.values["analysis"].confidence == 0.65
+    assert not [r for r in caplog.records if "unregistered type" in r.getMessage()]

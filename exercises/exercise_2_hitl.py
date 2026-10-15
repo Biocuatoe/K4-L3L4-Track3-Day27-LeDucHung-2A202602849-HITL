@@ -22,12 +22,12 @@ import argparse
 import uuid
 
 from dotenv import load_dotenv
-from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 from rich.console import Console
 from rich.panel import Panel
 
+from common.checkpoint import memory_saver
 from common.github import fetch_pr, post_review_comment
 from common.llm import get_llm, redact
 from common.review import (
@@ -169,7 +169,7 @@ def build_graph():
     g.add_edge("confirm", "commit")
     g.add_edge("commit", END)
     g.add_edge("escalate", END)
-    return g.compile(checkpointer=MemorySaver())
+    return g.compile(checkpointer=memory_saver())
 
 
 def prompt_human(payload: dict) -> dict:
